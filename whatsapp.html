@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Pesquisa Pós-Uso via WhatsApp — Itaú Seguros</title>
+<link rel="icon" href="data:,">
+
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+"use strict";
+const { useState, useEffect, useRef } = React;
+const storage = {
+    async get(key) {
+        try {
+            const raw = window.localStorage.getItem(key);
+            if (raw === null)
+                return null;
+            return { key, value: raw };
+        }
+        catch (e) {
+            return null;
+        }
+    },
+    async set(key, value) {
+        try {
+            window.localStorage.setItem(key, value);
+            return { key, value };
+        }
+        catch (e) {
+            return null;
+        }
+    },
+    async delete(key) {
+        try {
+            window.localStorage.removeItem(key);
+            return { key, deleted: true };
+        }
+        catch (e) {
+            return null;
+        }
+    },
+};
+/*
+  Simulação: WhatsApp (Itaú Staging) -> clique no link -> Pesquisa pós-uso
+  Padrão visual copiado das telas reais do Itaú Seguros:
+    - Faixa fina bicolor no topo (laranja + vinho/bordô)
+    - Logo "itaú" em card azul-marinho arredondado, centralizado
+    - Banner retangular gradiente laranja (clara -> queimada), ícone "i" em balão,
+      headline branca grande, sem cantos arredondados
+    - Corpo em branco, texto preto/cinza-escuro, saudação em laranja
+    - Rodapé com ícones sociais em círculos laranja e "Itaú Seguros S/A"
+  Cores extraídas do material de referência:
+    --marinho:  #14213D  (logo itaú)
+    --laranja-clara: #F4941E
+    --laranja-escura: #C1440E
+    --laranja-vinho: #7A2E1A (fio superior, parte bordô)
+    --texto: #2B2B2B
+    --cinza-link: #C1440E (links sublinhados)
+    --fundo-app: #ECE5DD (fundo estilo WhatsApp, só na tela 1)
+*/
+const STORAGE_KEY_PREFIX = "pesquisa-pos-uso";
+function useSessionId() {
+    const ref = useRef(null);
+    if (!ref.current) {
+        ref.current =
+            "resp_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+    }
+    return ref.current;
+}
+const MOTIVOS = [
+    { id: "A", label: "Rapidez da análise" },
+    { id: "B", label: "Clareza das informações recebidas" },
+    { id: "C", label: "Comunicação durante o processo" },
+    { id: "D", label: "Valor da indenização" },
+    { id: "E", label: "Outro" },
+];
+const MOTIVOS_RECUSADOS = [
+    { id: "A", label: "Eu esperava que essa situação estivesse coberta" },
+    { id: "B", label: "A comunicação não foi clara" },
+    { id: "C", label: "Demora na análise" },
+    { id: "D", label: "Dificuldade para acompanhar o processo" },
+    { id: "E", label: "Outro" },
+];
+const ENTENDIMENTO_OPCOES = [
+    { id: "A", label: "Sim" },
+    { id: "B", label: "Parcialmente" },
+    { id: "C", label: "Não" },
+];
+function NotaBotao({ n, ativa, onClick }) {
+    const faixa = n <= 6 ? "baixa" : n <= 8 ? "media" : "alta";
+    return (React.createElement("button", { onClick: () => onClick(n), "aria-pressed": ativa, "aria-label": `Nota ${n}`, className: `nota-btn nota-${faixa} ${ativa ? "nota-ativa" : ""}` },
+        React.createElement("span", { className: "nota-num" }, n)));
+}
+function BarraProgresso({ etapa, total }) {
+    const pct = Math.min(Math.max(etapa, 0), total) / total;
+    return (React.createElement("div", { className: "barra-progresso-wrap", "aria-hidden": "true" },
+        React.createElement("div", { className: "barra-progresso-trilho" },
+            React.createElement("div", { className: "barra-progresso-preenchida", style: { width: `${pct * 100}%` } }))));
+}
+function TopoItau({ titulo }) {
+    return React.createElement("div", { className: "fio-topo" });
+}
+function BannerLaranja({ children }) {
+    return (React.createElement("div", { className: "banner-laranja" },
+        React.createElement("div", { className: "banner-icone" }, "i"),
+        React.createElement("h1", { className: "banner-titulo" }, children)));
+}
+function RodapeItau() {
+    return (React.createElement("footer", { className: "rodape" },
+        React.createElement("p", { className: "rodape-assinatura" },
+            "Atenciosamente,",
+            React.createElement("br", null),
+            React.createElement("strong", null, "Ita\u00FA Seguros S/A")),
+        React.createElement("div", { className: "rodape-icones" },
+            React.createElement("span", { className: "icone-social" }, "f"),
+            React.createElement("span", { className: "icone-social" }, "\uD835\uDD4F"),
+            React.createElement("span", { className: "icone-social" }, "\u25CE"),
+            React.createElement("span", { className: "icone-social" }, "\u25B6")),
+        React.createElement("p", { className: "rodape-ajuda" }, "Precisa de ajuda? Entre em contato com a gente pelo chat do app.")));
+}
+function PesquisaPosUso() {
+    const sessionId = useSessionId();
+    // fase: "whatsapp" (lista de mensagens) | "pesquisa" (0 intro,1-3 perguntas,4 final)
+    const [fase, setFase] = useState("whatsapp");
+    // segmento: "pago" | "recusado" — define qual pesquisa é aberta
+    const [segmento, setSegmento] = useState("pago");
+    const [etapa, setEtapa] = useState(1);
+    const [nota, setNota] = useState(null);
+    const [entendimento, setEntendimento] = useState(null); // só usado no fluxo "recusado"
+    const [motivos, setMotivos] = useState([]);
+    const [comentario, setComentario] = useState("");
+    const [salvando, setSalvando] = useState(false);
+    const [erro, setErro] = useState(null);
+    const [carregado, setCarregado] = useState(false);
+    function abrirPesquisa(seg) {
+        setSegmento(seg);
+        setEtapa(1);
+        setNota(null);
+        setEntendimento(null);
+        setMotivos([]);
+        setComentario("");
+        setFase("pesquisa");
+    }
+    useEffect(() => {
+        (async () => {
+            try {
+                const res = await storage.get(`${STORAGE_KEY_PREFIX}:draft:${segmento}`);
+                if (res && res.value) {
+                    const draft = JSON.parse(res.value);
+                    if (draft.nota != null)
+                        setNota(draft.nota);
+                    if (draft.entendimento)
+                        setEntendimento(draft.entendimento);
+                    if (draft.motivos)
+                        setMotivos(draft.motivos);
+                    if (draft.comentario)
+                        setComentario(draft.comentario);
+                }
+            }
+            catch (e) { }
+            setCarregado(true);
+        })();
+    }, []);
+    async function salvarRascunho(next) {
+        try {
+            await storage.set(`${STORAGE_KEY_PREFIX}:draft:${segmento}`, JSON.stringify(Object.assign({ nota, entendimento, motivos, comentario }, next)));
+        }
+        catch (e) { }
+    }
+    async function finalizarEnvio() {
+        setSalvando(true);
+        setErro(null);
+        const registro = {
+            id: sessionId,
+            segmento: segmento === "pago" ? "CLIENTES PAGOS" : "CLIENTES RECUSADOS",
+            nota,
+            entendimento,
+            motivos,
+            comentario: comentario.trim(),
+            enviadoEm: new Date().toISOString(),
+        };
+        try {
+            await storage.set(`${STORAGE_KEY_PREFIX}:respostas:${segmento}:${sessionId}`, JSON.stringify(registro), true);
+            await storage
+                .delete(`${STORAGE_KEY_PREFIX}:draft:${segmento}`)
+                .catch(() => { });
+        }
+        catch (e) {
+            // Mesmo se o armazenamento falhar (ex: indisponível neste preview),
+            // a resposta da pessoa não pode ficar travada sem confirmação.
+        }
+        finally {
+            setSalvando(false);
+            setEtapa(4);
+        }
+    }
+    if (!carregado) {
+        return (React.createElement("div", { className: "tela-carregando" },
+            React.createElement("style", null, css),
+            React.createElement("div", { className: "loading-dot" })));
+    }
+    // ---------- FASE 1: WhatsApp ----------
+    if (fase === "whatsapp") {
+        return (React.createElement("div", { className: "wa-fundo" },
+            React.createElement("style", null, css),
+            React.createElement("div", { className: "wa-topo" },
+                React.createElement("span", { className: "wa-voltar" }, "\u2190"),
+                React.createElement("div", { className: "wa-avatar" }, "ita\u00FA"),
+                React.createElement("div", { className: "wa-titulo-wrap" },
+                    React.createElement("span", { className: "wa-titulo" }, "Ita\u00FA Seguros"),
+                    React.createElement("span", { className: "wa-subtitulo" }, "conta comercial")),
+                React.createElement("span", { className: "wa-icones" }, "\uD83D\uDCDE \u22EE")),
+            React.createElement("div", { className: "wa-corpo" },
+                React.createElement("div", { className: "wa-data-chip" }, "Hoje"),
+                React.createElement("div", { className: "wa-bolha" },
+                    React.createElement("div", { className: "wa-bolha-link", onClick: () => abrirPesquisa("pago") }, "\uD83D\uDD17 itau.com.br/pesquisa-satisfacao"),
+                    React.createElement("p", { className: "wa-texto" }, "Ol\u00E1! \uD83D\uDE0A"),
+                    React.createElement("p", { className: "wa-texto" }, "Vim te avisar que seu sinistro foi finalizado:"),
+                    React.createElement("p", { className: "wa-texto wa-detalhes" },
+                        React.createElement("strong", null, "N\u00FAmero do sinistro:"),
+                        React.createElement("br", null),
+                        "90177203468101",
+                        React.createElement("br", null),
+                        React.createElement("strong", null, "Data de abertura:"),
+                        " 18/09/2025",
+                        React.createElement("br", null),
+                        React.createElement("strong", null, "Cobertura acionada:"),
+                        " BOLSA PROTEGIDA",
+                        React.createElement("br", null),
+                        React.createElement("strong", null, "Status:"),
+                        " \u2705 pago"),
+                    React.createElement("p", { className: "wa-texto" }, "Se tiver outras coberturas, em breve te avisamos o status."),
+                    React.createElement("p", { className: "wa-texto" },
+                        "Voc\u00EA pode consultar os detalhes acessando o site Ita\u00FA Seguros com os seus dados. Por l\u00E1, \u00E9 s\u00F3 ir em",
+                        " ",
+                        React.createElement("strong", null, "consultar meu sinistro"),
+                        "."),
+                    React.createElement("p", { className: "wa-texto" },
+                        "Agora que tudo foi resolvido, queremos entender como foi a sua experi\u00EAncia com a gente \u2014 sua percep\u00E7\u00E3o nos ajuda a medir sua satisfa\u00E7\u00E3o e melhorar cada vez mais. Responda nossa pesquisa \u2014 leva menos de 1 minuto:",
+                        " ",
+                        React.createElement("span", { className: "wa-link-texto", onClick: () => abrirPesquisa("pago") }, "itau.com.br/pesquisa-satisfacao")),
+                    React.createElement("span", { className: "wa-hora" }, "17:59 \u2713\u2713")),
+                React.createElement("div", { className: "wa-bolha", style: { marginTop: 14 } },
+                    React.createElement("div", { className: "wa-bolha-link", onClick: () => abrirPesquisa("recusado") }, "\uD83D\uDD17 itau.com.br/pesquisa-satisfacao"),
+                    React.createElement("p", { className: "wa-texto" }, "Ol\u00E1."),
+                    React.createElement("p", { className: "wa-texto" }, "Analisamos seu sinistro com cuidado e, neste caso, n\u00E3o foi poss\u00EDvel aprovar a cobertura solicitada. Sabemos que essa n\u00E3o \u00E9 a not\u00EDcia que voc\u00EA esperava, e queremos ser transparentes com os detalhes da decis\u00E3o:"),
+                    React.createElement("p", { className: "wa-texto wa-detalhes" },
+                        React.createElement("strong", null, "N\u00FAmero do sinistro:"),
+                        React.createElement("br", null),
+                        "90177203468102",
+                        React.createElement("br", null),
+                        React.createElement("strong", null, "Data de abertura:"),
+                        " 22/09/2025",
+                        React.createElement("br", null),
+                        React.createElement("strong", null, "Cobertura acionada:"),
+                        " BOLSA PROTEGIDA",
+                        React.createElement("br", null),
+                        React.createElement("strong", null, "Status:"),
+                        " \u274C recusado"),
+                    React.createElement("p", { className: "wa-texto" }, "Se tiver outras coberturas, em breve te avisamos o status."),
+                    React.createElement("p", { className: "wa-texto" },
+                        "Voc\u00EA pode consultar os detalhes acessando o site Ita\u00FA Seguros com os seus dados. Por l\u00E1, \u00E9 s\u00F3 ir em",
+                        " ",
+                        React.createElement("strong", null, "consultar meu sinistro"),
+                        "."),
+                    React.createElement("p", { className: "wa-texto" },
+                        "Mesmo com essa decis\u00E3o, queremos entender o quanto voc\u00EA compreendeu os motivos e como foi sua percep\u00E7\u00E3o sobre todo o processo. Sua resposta nos ajuda a melhorar a forma como conduzimos e comunicamos esses casos \u2014 leva menos de 1 minuto:",
+                        " ",
+                        React.createElement("span", { className: "wa-link-texto", onClick: () => abrirPesquisa("recusado") }, "itau.com.br/pesquisa-satisfacao")),
+                    React.createElement("span", { className: "wa-hora" }, "18:04 \u2713\u2713")))));
+    }
+    // ---------- FASE 2: Pesquisa (padrão carta Itaú) ----------
+    // Etapas: 1 = intro + pergunta 1 (nota/entendimento) | 2 = motivo | 3 = texto livre (opcional) | 4 = final
+    const ehRecusado = segmento === "recusado";
+    const motivosAtivos = ehRecusado ? MOTIVOS_RECUSADOS : MOTIVOS;
+    const TOTAL_ETAPAS = 3;
+    return (React.createElement("div", { className: "app-raiz" },
+        React.createElement("style", null, css),
+        React.createElement("div", { className: "carta" },
+            React.createElement(TopoItau, null),
+            etapa === 1 && (React.createElement(React.Fragment, null,
+                React.createElement(BannerLaranja, null, ehRecusado
+                    ? "Queremos entender sua experiência com a decisão do seu sinistro."
+                    : "Queremos saber sua opinião sobre a devolutiva do seu sinistro."),
+                React.createElement(BarraProgresso, { etapa: etapa, total: TOTAL_ETAPAS }),
+                React.createElement("div", { className: "corpo-carta" },
+                    React.createElement("p", { className: "saudacao" }, "Ol\u00E1."),
+                    ehRecusado ? (React.createElement("p", { className: "paragrafo" }, "Conclu\u00EDmos a an\u00E1lise do seu sinistro e, neste caso, a cobertura n\u00E3o foi aprovada. Mesmo assim, gostar\u00EDamos de ouvir voc\u00EA: sua opini\u00E3o nos ajuda a entender o que podemos melhorar na forma como conduzimos e comunicamos esse tipo de decis\u00E3o. S\u00E3o s\u00F3 3 perguntas r\u00E1pidas.")) : (React.createElement("p", { className: "paragrafo" }, "Conclu\u00EDmos a an\u00E1lise do seu sinistro. Agora, gostar\u00EDamos de ouvir voc\u00EA: sua opini\u00E3o nos ajuda a entender o que fizemos bem e o que podemos melhorar para os pr\u00F3ximos clientes. S\u00E3o s\u00F3 3 perguntas r\u00E1pidas.")),
+                    ehRecusado ? (React.createElement(React.Fragment, null,
+                        React.createElement("p", { className: "pergunta-titulo" }, "Voc\u00EA entendeu o motivo da decis\u00E3o do seu sinistro?"),
+                        React.createElement("div", { className: "opcoes-lista" }, ENTENDIMENTO_OPCOES.map((op) => (React.createElement("button", { key: op.id, className: `opcao-item ${entendimento === op.id ? "opcao-ativa" : ""}`, onClick: () => {
+                                setEntendimento(op.id);
+                                salvarRascunho({ entendimento: op.id });
+                                setTimeout(() => setEtapa(2), 220);
+                            } },
+                            React.createElement("span", { className: "opcao-letra" }, op.id),
+                            React.createElement("span", null, op.label))))))) : (React.createElement(React.Fragment, null,
+                        React.createElement("p", { className: "pergunta-titulo" }, "De 0 a 10, como voc\u00EA avalia sua experi\u00EAncia no processo do sinistro?"),
+                        React.createElement("div", { className: "notas-grade" }, Array.from({ length: 11 }, (_, i) => i).map((n) => (React.createElement(NotaBotao, { key: n, n: n, ativa: nota === n, onClick: (v) => {
+                                setNota(v);
+                                salvarRascunho({ nota: v });
+                                setTimeout(() => setEtapa(2), 220);
+                            } })))))),
+                    React.createElement(RodapeItau, null)))),
+            etapa === 2 && (React.createElement(React.Fragment, null,
+                React.createElement(BannerLaranja, null, ehRecusado
+                    ? "Queremos entender sua experiência com a decisão do seu sinistro."
+                    : "Queremos saber sua opinião sobre a devolutiva do seu sinistro."),
+                React.createElement(BarraProgresso, { etapa: etapa, total: TOTAL_ETAPAS }),
+                React.createElement("div", { className: "corpo-carta" },
+                    React.createElement("p", { className: "pergunta-titulo" }, ehRecusado
+                        ? "O que mais impactou sua experiência?"
+                        : "O que mais influenciou sua avaliação?"),
+                    React.createElement("p", { className: "pergunta-opcional" }, "Selecione uma ou mais op\u00E7\u00F5es"),
+                    React.createElement("div", { className: "opcoes-lista" }, motivosAtivos.map((m) => {
+                        const selecionado = motivos.includes(m.id);
+                        return (React.createElement("button", { key: m.id, className: `opcao-item ${selecionado ? "opcao-ativa" : ""}`, onClick: () => {
+                                const proximos = selecionado
+                                    ? motivos.filter((id) => id !== m.id)
+                                    : [...motivos, m.id];
+                                setMotivos(proximos);
+                                salvarRascunho({ motivos: proximos });
+                            } },
+                            React.createElement("span", { className: "opcao-check" }, selecionado ? "✓" : ""),
+                            React.createElement("span", null, m.label)));
+                    })),
+                    React.createElement("div", { className: "nav-duas-colunas" },
+                        React.createElement("button", { className: "botao-secundario", onClick: () => setEtapa(1) }, "Voltar"),
+                        React.createElement("button", { className: "botao-primario", disabled: motivos.length === 0, onClick: () => setEtapa(3) }, "Continuar")),
+                    React.createElement(RodapeItau, null)))),
+            etapa === 3 && (React.createElement(React.Fragment, null,
+                React.createElement(BannerLaranja, null, ehRecusado
+                    ? "Queremos entender sua experiência com a decisão do seu sinistro."
+                    : "Queremos saber sua opinião sobre a devolutiva do seu sinistro."),
+                React.createElement(BarraProgresso, { etapa: etapa, total: TOTAL_ETAPAS }),
+                React.createElement("div", { className: "corpo-carta" },
+                    React.createElement("p", { className: "pergunta-titulo" }, ehRecusado
+                        ? "Existe algo que poderíamos ter feito para tornar sua experiência melhor, mesmo com essa decisão?"
+                        : "O que poderíamos fazer para melhorar sua experiência?"),
+                    React.createElement("p", { className: "pergunta-opcional" }, "Opcional"),
+                    React.createElement("textarea", { className: "campo-texto", placeholder: ehRecusado
+                            ? "Deixe aqui sua percepção sobre como poderíamos ter feito uma experiência melhor."
+                            : "Deixe aqui sua percepção sobre como podemos melhorar sua experiência", value: comentario, onChange: (e) => {
+                            setComentario(e.target.value);
+                            salvarRascunho({ comentario: e.target.value });
+                        }, rows: 5, maxLength: 600 }),
+                    React.createElement("span", { className: "contador" },
+                        comentario.length,
+                        "/600"),
+                    erro && React.createElement("p", { className: "mensagem-erro" }, erro),
+                    React.createElement("div", { className: "nav-duas-colunas" },
+                        React.createElement("button", { className: "botao-secundario", onClick: () => setEtapa(2) }, "Voltar"),
+                        React.createElement("button", { className: "botao-primario botao-concluir", disabled: salvando, onClick: finalizarEnvio }, salvando ? "Enviando..." : "Concluir e enviar")),
+                    React.createElement(RodapeItau, null)))),
+            etapa === 4 && (React.createElement(React.Fragment, null,
+                React.createElement(BannerLaranja, null, "Obrigado pela sua resposta."),
+                React.createElement("div", { className: "corpo-carta" },
+                    React.createElement("p", { className: "saudacao" }, "Ol\u00E1."),
+                    React.createElement("p", { className: "paragrafo" }, "Sua avalia\u00E7\u00E3o foi registrada com sucesso e vai apoiar diretamente melhorias no processo de sinistros. Conte com o Ita\u00FA para futuros acionamentos."),
+                    React.createElement(RodapeItau, null)))))));
+}
+const css = `
+  * { box-sizing: border-box; }
+  body, .app-raiz, .wa-fundo { margin: 0; }
+
+  /* ===== Tela WhatsApp ===== */
+  .wa-fundo {
+    min-height: 100vh;
+    width: 100%;
+    background: #0B141A;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+  }
+  .wa-topo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 16px;
+    background: #1F2C34;
+    color: #E9EDEF;
+  }
+  .wa-voltar { font-size: 20px; }
+  .wa-avatar {
+    width: 36px; height: 36px; border-radius: 50%;
+    background: #003D7C;
+    color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 700; font-style: italic;
+  }
+  .wa-titulo-wrap { display: flex; flex-direction: column; flex: 1; }
+  .wa-titulo { font-size: 15.5px; font-weight: 600; }
+  .wa-subtitulo { font-size: 12px; color: #8696A0; }
+  .wa-icones { font-size: 15px; letter-spacing: 8px; }
+
+  .wa-corpo {
+    flex: 1;
+    background-image:
+      radial-gradient(circle at 10% 10%, rgba(255,255,255,0.02) 1px, transparent 1px);
+    background-size: 18px 18px;
+    background-color: #0B141A;
+    padding: 18px 12px 40px;
+  }
+  .wa-data-chip {
+    width: fit-content;
+    margin: 0 auto 16px;
+    background: #1F2C34;
+    color: #8696A0;
+    font-size: 12px;
+    padding: 4px 12px;
+    border-radius: 8px;
+  }
+  .wa-bolha {
+    background: #202C33;
+    border-radius: 0 12px 12px 12px;
+    padding: 12px 14px 8px;
+    max-width: 480px;
+    color: #E9EDEF;
+    box-shadow: 0 1px 1px rgba(0,0,0,0.3);
+  }
+  .wa-bolha-link {
+    color: #00A884;
+    font-size: 13px;
+    font-weight: 600;
+    padding-bottom: 10px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid #2A3942;
+    cursor: pointer;
+  }
+  .wa-texto {
+    font-size: 14.5px;
+    line-height: 1.5;
+    margin: 0 0 10px;
+  }
+  .wa-link-texto {
+    color: #53BDEB;
+    text-decoration: underline;
+    cursor: pointer;
+    word-break: break-all;
+  }
+  .wa-detalhes {
+    background: #182229;
+    border-radius: 8px;
+    padding: 10px 12px;
+    line-height: 1.7;
+  }
+  .wa-hora {
+    display: block;
+    text-align: right;
+    font-size: 11px;
+    color: #8696A0;
+    margin-top: 6px;
+  }
+
+  /* ===== Tela Carta / Pesquisa (padrão Itaú) ===== */
+  .tela-carregando {
+    min-height: 100vh; width: 100%;
+    display: flex; align-items: center; justify-content: center;
+    background: #fff;
+  }
+  .loading-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: #C1440E;
+    animation: pulso 1s ease-in-out infinite;
+  }
+  @keyframes pulso {
+    0%, 100% { opacity: 0.3; transform: scale(0.8); }
+    50% { opacity: 1; transform: scale(1.1); }
+  }
+
+  .app-raiz {
+    min-height: 100vh;
+    width: 100%;
+    background: #E9E9E9;
+    display: flex;
+    justify-content: center;
+    padding: 0;
+    font-family: Arial, Helvetica, sans-serif;
+    color: #2B2B2B;
+  }
+
+  .carta {
+    width: 100%;
+    max-width: 520px;
+    background: #FFFFFF;
+    min-height: 100vh;
+  }
+
+  .fio-topo {
+    height: 4px;
+    width: 100%;
+    background: linear-gradient(90deg, #7A2E1A 0%, #C1440E 45%, #F4941E 100%);
+  }
+
+  .logo-faixa {
+    display: flex;
+    justify-content: center;
+    padding: 22px 0 18px;
+    background: #FFFFFF;
+  }
+  .logo-card {
+    background: #003D7C;
+    color: #fff;
+    font-weight: 800;
+    font-style: italic;
+    font-size: 26px;
+    width: 108px;
+    height: 88px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 22px;
+    letter-spacing: 0.2px;
+  }
+
+  .barra-progresso-wrap {
+    padding: 16px 26px;
+    background: #FFFFFF;
+    border-bottom: 1px solid #F3E9DC;
+  }
+  .barra-progresso-trilho {
+    width: 100%;
+    height: 5px;
+    border-radius: 999px;
+    background: #F0DCC8;
+    overflow: hidden;
+  }
+  .barra-progresso-preenchida {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #F4941E 0%, #C1440E 100%);
+    transition: width 320ms ease;
+  }
+
+  .banner-laranja {
+    background: linear-gradient(160deg, #F4941E 0%, #C1440E 100%);
+    padding: 34px 26px 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .banner-icone {
+    width: 30px; height: 30px;
+    border: 2px solid #fff;
+    border-radius: 6px;
+    color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700;
+    font-size: 15px;
+    font-family: Georgia, serif;
+  }
+  .banner-titulo {
+    color: #fff;
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 25px;
+    font-weight: 800;
+    line-height: 1.3;
+    margin: 0;
+    max-width: 420px;
+  }
+
+  .corpo-carta {
+    padding: 26px 26px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .saudacao {
+    color: #C1440E;
+    font-weight: 700;
+    font-size: 15px;
+    margin: 0;
+  }
+
+  .paragrafo {
+    font-size: 14.5px;
+    line-height: 1.6;
+    color: #2B2B2B;
+    margin: 0;
+  }
+
+  .pergunta-titulo {
+    font-size: 17px;
+    font-weight: 700;
+    line-height: 1.45;
+    color: #1A1A1A;
+    margin: 4px 0 4px;
+  }
+
+  .notas-grade {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    gap: 4px;
+    margin: 6px 0 6px;
+    width: 100%;
+  }
+  .nota-btn {
+    flex: 1 1 0;
+    min-width: 0;
+    height: 40px;
+    border-radius: 6px;
+    border: none;
+    background: #F0DCC8;
+    color: #7A5E42;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: transform 120ms ease, filter 120ms ease;
+    padding: 0;
+  }
+  .nota-num { font-size: 12.5px; font-weight: 800; }
+  .nota-btn:hover { transform: translateY(-1px); }
+  .nota-ativa.nota-baixa { background: #B23A1A; color: #fff; }
+  .nota-ativa.nota-media { background: #F4941E; color: #3A2410; }
+  .nota-ativa.nota-alta { background: #1F7A5C; color: #fff; }
+
+  .opcoes-lista { display: flex; flex-direction: column; gap: 8px; margin: 6px 0; }
+  .opcao-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    text-align: left;
+    padding: 13px 14px;
+    border-radius: 10px;
+    border: 1.5px solid #E7DACB;
+    background: #FFFFFF;
+    font-size: 14.5px;
+    color: #2B2B2B;
+    cursor: pointer;
+    transition: border-color 120ms ease, background 120ms ease;
+  }
+  .opcao-item:hover { border-color: #F4941E; }
+  .opcao-ativa { border-color: #C1440E; background: #FFF3E8; }
+  .opcao-letra {
+    flex: none;
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    background: #F0DCC8;
+    color: #7A5E42;
+    font-size: 11px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .opcao-ativa .opcao-letra { background: #C1440E; color: #fff; }
+
+  .opcao-check {
+    flex: none;
+    width: 22px; height: 22px;
+    border-radius: 6px;
+    border: 1.5px solid #D8C6AE;
+    background: #FFFFFF;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 800;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .opcao-ativa .opcao-check {
+    background: #C1440E;
+    border-color: #C1440E;
+  }
+
+  .pergunta-opcional {
+    font-size: 11.5px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #A08A70;
+    margin: -6px 0 0;
+  }
+
+  .campo-texto {
+    width: 100%;
+    resize: vertical;
+    border-radius: 10px;
+    border: 1.5px solid #E7DACB;
+    padding: 12px 14px;
+    font-size: 14.5px;
+    font-family: inherit;
+    color: #2B2B2B;
+    outline: none;
+    margin-top: 4px;
+  }
+  .campo-texto:focus { border-color: #C1440E; }
+  .contador { align-self: flex-end; font-size: 11.5px; color: #A08A70; margin-top: -10px; }
+  .mensagem-erro { font-size: 13px; color: #B23A1A; margin: 0; }
+
+  .botao-primario {
+    background: #C1440E;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 14px 18px;
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+    margin-top: 4px;
+    transition: background 200ms ease, filter 120ms ease, transform 100ms ease;
+  }
+  .botao-primario:hover:not(:disabled) { filter: brightness(1.05); }
+  .botao-primario:disabled { background: #C7C2BB; color: #fff; cursor: not-allowed; }
+  .botao-concluir:disabled { background: #C7C2BB; }
+  .botao-concluir:active:not(:disabled) { transform: scale(0.98); }
+
+  .botao-secundario {
+    background: transparent;
+    color: #2B2B2B;
+    border: 1.5px solid #E7DACB;
+    border-radius: 8px;
+    padding: 14px 18px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .nav-duas-colunas { display: flex; gap: 10px; margin-top: 4px; }
+  .nav-duas-colunas .botao-primario,
+  .nav-duas-colunas .botao-secundario { flex: 1; margin-top: 0; }
+
+  .resumo-final {
+    border-radius: 10px;
+    border: 1px solid #E7DACB;
+    background: #FFF8EF;
+    padding: 4px 14px;
+    margin: 4px 0;
+  }
+  .resumo-linha {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 12px 0; border-bottom: 1px solid #F0DFC9; font-size: 14px;
+  }
+  .resumo-linha:last-child { border-bottom: none; }
+  .resumo-linha span { color: #8A6E52; }
+  .resumo-linha strong { color: #1A1A1A; }
+
+  .rodape {
+    border-top: 1px solid #EDEDED;
+    margin-top: 22px;
+    padding: 20px 0 32px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .rodape-assinatura {
+    font-size: 13.5px;
+    color: #2B2B2B;
+    line-height: 1.6;
+    margin: 0;
+  }
+  .rodape-icones { display: flex; gap: 10px; }
+  .icone-social {
+    width: 30px; height: 30px;
+    border-radius: 50%;
+    background: #C1440E;
+    color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px;
+    font-weight: 700;
+  }
+  .rodape-ajuda { font-size: 12px; color: #8A8A8A; margin: 0; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .loading-dot { animation: none !important; }
+  }
+`;
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(React.createElement(PesquisaPosUso));
+</script>
+</body>
+</html>
